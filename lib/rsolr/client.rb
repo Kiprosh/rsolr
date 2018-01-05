@@ -1,13 +1,12 @@
-begin
-  require 'json'
-rescue LoadError
-end
+require 'json'
+require 'faraday'
+require 'uri'
 
 class RSolr::Client
 
   class << self
     def default_wt
-      @default_wt || :ruby
+      @default_wt ||= :json
     end
 
     def default_wt= value
@@ -15,7 +14,7 @@ class RSolr::Client
     end
   end
 
-  attr_reader :connection, :uri, :proxy, :options, :update_path
+  attr_reader :uri, :proxy, :update_format, :options, :update_path
 
   def initialize connection, options = {}
     @connection = connection
@@ -31,7 +30,7 @@ class RSolr::Client
 
       # Add default URI
       @available_uris << 'http://127.0.0.1:8983/solr/' if @available_uris.empty?
-      @available_uris.map! { |u| RSolr::Uri.create(u) }
+      @available_uris.map! { |u| ::URI.parse(u) }
 
       # Select primary URI
       select_primary_uri
@@ -39,11 +38,12 @@ class RSolr::Client
       if options[:proxy]
         proxy_url = options[:proxy].dup
         proxy_url << "/" unless proxy_url.nil? or proxy_url[-1] == ?/
-        @proxy = RSolr::Uri.create proxy_url if proxy_url
+        @proxy = ::URI.parse proxy_url if proxy_url
       elsif options[:proxy] == false
         @proxy = false  # used to avoid setting the proxy from the environment.
       end
     end
+    @update_format = options.delete(:update_format) || RSolr::JSON::Generator
     @update_path = options.fetch(:update_path, 'update')
     @options = options
   end
@@ -53,7 +53,7 @@ class RSolr::Client
     base_uri.request_uri if base_uri
   end
 
-  # returns the RSolr::URI uri object.
+  # returns the URI uri object.
   def base_uri
     @primary_uri
   end
@@ -92,11 +92,10 @@ class RSolr::Client
   #
   def update opts = {}
     opts[:headers] ||= {}
-    opts[:headers]['Content-Type'] ||= 'text/xml'
+    opts[:headers]['Content-Type'] ||= builder.content_type
     post opts.fetch(:path, update_path), opts
   end
 
-  #
   # +add+ creates xml "add" documents and sends the xml data to the +update+ method
   #
   # http://wiki.apache.org/solr/UpdateXmlMessages#add.2BAC8-update
@@ -113,7 +112,7 @@ class RSolr::Client
   #
   def add doc, opts = {}
     add_attributes = opts.delete :add_attributes
-    update opts.merge(:data => xml.add(doc, add_attributes))
+    update opts.merge(:data => builder.add(doc, add_attributes))
   end
 
   # send "commit" xml with opts
@@ -122,7 +121,7 @@ class RSolr::Client
   #
   def commit opts = {}
     commit_attrs = opts.delete :commit_attributes
-    update opts.merge(:data => xml.commit( commit_attrs ))
+    update opts.merge(:data => builder.commit( commit_attrs ))
   end
 
   # send "optimize" xml with opts.
@@ -131,7 +130,7 @@ class RSolr::Client
   #
   def optimize opts = {}
     optimize_attributes = opts.delete :optimize_attributes
-    update opts.merge(:data => xml.optimize(optimize_attributes))
+    update opts.merge(:data => builder.optimize(optimize_attributes))
   end
 
   # send </rollback>
@@ -140,14 +139,14 @@ class RSolr::Client
   #
   # NOTE: solr 1.4 only
   def rollback opts = {}
-    update opts.merge(:data => xml.rollback)
+    update opts.merge(:data => builder.rollback)
   end
 
   # Delete one or many documents by id
   #   solr.delete_by_id 10
   #   solr.delete_by_id([12, 41, 199])
   def delete_by_id id, opts = {}
-    update opts.merge(:data => xml.delete_by_id(id))
+    update opts.merge(:data => builder.delete_by_id(id))
   end
 
   # delete one or many documents by query.
@@ -157,12 +156,19 @@ class RSolr::Client
   #   solr.delete_by_query 'available:0'
   #   solr.delete_by_query ['quantity:0', 'manu:"FQ"']
   def delete_by_query query, opts = {}
-    update opts.merge(:data => xml.delete_by_query(query))
+    update opts.merge(:data => builder.delete_by_query(query))
   end
 
-  # shortcut to RSolr::Xml::Generator
-  def xml
-    @xml ||= RSolr::Xml::Generator.new
+  def builder
+    @builder ||= if update_format.is_a? Class
+                   update_format.new
+                 elsif update_format == :json
+                   RSolr::JSON::Generator.new
+                 elsif update_format == :xml
+                   RSolr::Xml::Generator.new
+                 else
+                   update_format
+                 end
   end
 
   # +send_and_receive+ is the main request method responsible for sending requests to the +connection+ object.
@@ -189,18 +195,23 @@ class RSolr::Client
 
   #
   def execute request_context
-    raw_response = connection.execute self, request_context
-
-    while retry_503?(request_context, raw_response)
-      request_context[:retry_503] -= 1
-      sleep retry_after(raw_response)
-      raw_response = connection.execute self, request_context
-    end
-
-    unless raw_response.nil?
-      # Reset failed URIs in case of a successful request
-      @failed_uris.clear
-      adapt_response(request_context, raw_response)
+    begin
+      response = connection.send(request_context[:method], request_context[:uri].to_s) do |req|
+        req.body = request_context[:data] if request_context[:method] == :post and request_context[:data]
+        req.headers.merge!(request_context[:headers]) if request_context[:headers]
+      end
+      response = { status: response.status.to_i, headers: response.headers, body: response.body.force_encoding('utf-8') }
+      unless response.nil?
+        # Reset failed URIs in case of a successful request
+        @failed_uris.clear
+        adapt_response(request_context, response)
+      end
+    rescue Errno::ECONNREFUSED, Faraday::Error::ConnectionFailed => e
+      response = retry_request(request_context) and return response
+      raise RSolr::Error::ConnectionRefused, request_context.inspect
+    rescue Faraday::Error => e
+      response = retry_request(request_context) and return response
+      raise RSolr::Error::Http.new(request_context, e.response)
     end
   end
 
@@ -222,34 +233,9 @@ class RSolr::Client
     true
   end
 
-  def retry_503?(request_context, response)
-    return false if response.nil?
-    status = response[:status] && response[:status].to_i
-    return false unless status == 503
-    retry_503 = request_context[:retry_503]
-    return false unless retry_503 && retry_503 > 0
-    retry_after_limit = request_context[:retry_after_limit] || 1
-    retry_after = retry_after(response)
-    return false unless retry_after && retry_after <= retry_after_limit
-    true
-  end
-
-  # Retry-After can be a relative number of seconds from now, or an RFC 1123 Date.
-  # If the latter, attempt to convert it to a relative time in seconds.
-  def retry_after(response)
-    retry_after = Array(response[:headers]['Retry-After'] || response[:headers]['retry-after']).flatten.first.to_s
-    if retry_after =~ /\A[0-9]+\Z/
-      retry_after = retry_after.to_i
-    else
-      begin
-        retry_after_date = DateTime.parse(retry_after)
-        retry_after = retry_after_date.to_time - Time.now
-        retry_after = nil if retry_after < 0
-      rescue ArgumentError
-        retry_after = retry_after.to_i
-      end
-    end
-    retry_after
+  def retry_request(request_context)
+    return false unless try_another_node?(request_context)
+    execute(request_context)
   end
 
   # +build_request+ accepts a path and options hash,
@@ -283,10 +269,6 @@ class RSolr::Client
     opts[:path] = path
     opts[:uri] = base_uri.merge(path.to_s + (query ? "?#{query}" : "")) if base_uri
 
-    [:open_timeout, :read_timeout, :retry_503, :retry_after_limit].each do |k|
-      opts[k] = @options[k]
-    end
-
     opts
   end
 
@@ -318,7 +300,6 @@ class RSolr::Client
   def adapt_response request, response
     raise "The response does not have the correct keys => :body, :headers, :status" unless
       %W(body headers status) == response.keys.map{|k|k.to_s}.sort
-    raise RSolr::Error::Http.new request, response unless [200,302].include? response[:status]
 
     result = if respond_to? "evaluate_#{request[:params][:wt]}_response", true
       send "evaluate_#{request[:params][:wt]}_response", request, response
@@ -331,6 +312,26 @@ class RSolr::Client
     end
 
     result
+  end
+
+  def connection
+    @connection ||= begin
+      conn_opts = { request: {} }
+      conn_opts[:url] = base_uri.to_s
+      conn_opts[:proxy] = proxy if proxy
+      conn_opts[:request][:open_timeout] = options[:open_timeout] if options[:open_timeout]
+      conn_opts[:request][:timeout] = options[:read_timeout] if options[:read_timeout]
+      conn_opts[:request][:params_encoder] = Faraday::FlatParamsEncoder
+
+      Faraday.new(conn_opts) do |conn|
+        conn.basic_auth(base_uri.user, base_uri.password) if base_uri.user && base_uri.password
+        conn.response :raise_error
+        conn.request :retry, max: options[:retry_after_limit], interval: 0.05,
+                             interval_randomness: 0.5, backoff_factor: 2,
+                             exceptions: ['Faraday::Error', 'Timeout::Error'] if options[:retry_503]
+        conn.adapter options[:adapter] || Faraday.default_adapter
+      end
+    end
   end
 
   protected
@@ -352,21 +353,17 @@ class RSolr::Client
   # instead, giving full access to the
   # request/response objects.
   def evaluate_ruby_response request, response
-    begin
-      Kernel.eval response[:body].to_s
-    rescue SyntaxError
-      raise RSolr::Error::InvalidRubyResponse.new request, response
-    end
+    Kernel.eval response[:body].to_s
+  rescue SyntaxError
+    raise RSolr::Error::InvalidRubyResponse.new request, response
   end
 
   def evaluate_json_response request, response
-    return response[:body] unless defined? JSON
+    return if response[:body].nil? || response[:body].empty?
 
-    begin
-      JSON.parse response[:body].to_s
-    rescue JSON::ParserError
-      raise RSolr::Error::InvalidJsonResponse.new request, response
-    end
+    JSON.parse response[:body].to_s
+  rescue JSON::ParserError
+    raise RSolr::Error::InvalidJsonResponse.new request, response
   end
 
   def default_wt

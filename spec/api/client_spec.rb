@@ -1,5 +1,23 @@
 require 'spec_helper'
-describe "RSolr::Client" do
+require 'net/http'
+
+module ClientHelper
+  # def client
+  #   @client ||= RSolr.connect(:url => node_urls.dup, :read_timeout => 42, :open_timeout => 43)
+  # end
+end
+
+RSpec.describe RSolr::Client do
+  let(:connection) { nil }
+  let(:connection_options) { { url: "http://localhost:9999/solr", read_timeout: 42, open_timeout: 43, update_format: :xml } }
+
+  let(:client) do
+    RSolr::Client.new connection, connection_options
+  end
+
+  let(:client_with_proxy) do
+    RSolr::Client.new connection, connection_options.merge(proxy: 'http://localhost:8080')
+  end
 
   let(:node_urls) do
     ["http://localhost:9998/solr/", "http://localhost:9999/solr/"]
@@ -11,19 +29,6 @@ describe "RSolr::Client" do
     response.body = "{'responseHeader'=>{'status'=>0,'QTime'=>0,'params'=>{'q'=>'*:*'}},'response'=>{'numFound'=>0,'start'=>0,'docs'=>[]}}"
     response.instance_variable_set("@read", true)
     response
-  end
-
-  module ClientHelper
-    def client
-      @client ||= RSolr.connect(:url => node_urls.dup, :read_timeout => 42, :open_timeout => 43)
-    end
-
-    def client_with_proxy
-      @client_with_proxy ||= (
-        connection = RSolr::Connection.new
-        RSolr::Client.new connection, :url => "http://localhost:9999/solr", :proxy => 'http://localhost:8080', :read_timeout => 42, :open_timeout=>43
-      )
-    end
   end
 
   context "initialize" do
@@ -58,25 +63,17 @@ describe "RSolr::Client" do
   end
 
   context "send_and_receive" do
-    include ClientHelper
     it "should forward these method calls the #connection object" do
       [:get, :post, :head].each do |meth|
-        expect(client.connection).to receive(:execute).
+        expect(client).to receive(:execute).
           and_return({:status => 200, :body => "{}", :headers => {}})
-        client.send_and_receive '', :method => meth, :params => {}, :data => nil, :headers => {}
-      end
-    end
-
-    it "should be timeout aware" do
-      [:get, :post, :head].each do |meth|
-        expect(client.connection).to receive(:execute).with(client, hash_including(:read_timeout => 42, :open_timeout=>43))
         client.send_and_receive '', :method => meth, :params => {}, :data => nil, :headers => {}
       end
     end
   end
 
   context "execute" do
-    include ClientHelper
+    # include ClientHelper
     let :request_context do
       {
         :method => :post,
@@ -88,23 +85,8 @@ describe "RSolr::Client" do
         :retry_503 => 1
       }
     end
-    it "should retry 503s if requested" do
-      expect(client.connection).to receive(:execute).exactly(2).times.and_return(
-        {:status => 503, :body => "{}", :headers => {'Retry-After' => 0}},
-        {:status => 200, :body => "{}", :headers => {}}
-      )
-      client.execute request_context
-    end
-    it "should not retry a 503 if the retry-after is too large" do
-      expect(client.connection).to receive(:execute).exactly(1).times.and_return(
-        {:status => 503, :body => "{}", :headers => {'Retry-After' => 10}}
-      )
-      expect {
-        Timeout.timeout(0.5) do
-          client.execute({:retry_after_limit => 0}.merge(request_context))
-        end
-      }.to raise_error(RSolr::Error::Http)
-    end
+
+    let (:client) { RSolr::Client.new connection, { url: node_urls.dup, read_timeout: 42, open_timeout: 43, update_format: :xml } }
 
     it "should not modify stored URIs" do
       expect(client.instance_variable_get("@available_uris").map(&:to_s)).to eq node_urls
@@ -168,11 +150,10 @@ describe "RSolr::Client" do
   end
 
   context "post" do
-    include ClientHelper
     it "should pass the expected params to the connection's #execute method" do
       request_opts = {:data => "the data", :method=>:post, :headers => {"Content-Type" => "text/plain"}}
-      expect(client.connection).to receive(:execute).
-        with(client, hash_including(request_opts)).
+      expect(client).to receive(:execute).
+        with(hash_including(request_opts)).
         and_return(
           :body => "",
           :status => 200,
@@ -182,19 +163,11 @@ describe "RSolr::Client" do
     end
   end
 
-  context "xml" do
-    include ClientHelper
-    it "should return an instance of RSolr::Xml::Generator" do
-      expect(client.xml).to be_a RSolr::Xml::Generator
-    end
-  end
-
   context "add" do
-    include ClientHelper
     it "should send xml to the connection's #post method" do
-      expect(client.connection).to receive(:execute).
+      expect(client).to receive(:execute).
         with(
-          client, hash_including({
+          hash_including({
             :path => "update",
             :headers => {"Content-Type"=>"text/xml"},
             :method => :post,
@@ -206,19 +179,59 @@ describe "RSolr::Client" do
         :status => 200,
         :headers => {"Content-Type"=>"text/xml"}
       )
-      expect(client.xml).to receive(:add).
+      expect(client.builder).to receive(:add).
         with({:id=>1}, {:commitWith=>10}).
         and_return("<xml/>")
       client.add({:id=>1}, :add_attributes => {:commitWith=>10})
     end
+
+    context 'when the client is configured for json updates' do
+      let(:client) do
+        RSolr::Client.new nil, :url => "http://localhost:9999/solr", :read_timeout => 42, :open_timeout=>43, :update_format => :json
+      end
+      it "should send json to the connection's #post method" do
+        expect(client).to receive(:execute).
+          with(hash_including({
+              :path => 'update',
+              :headers => {"Content-Type" => 'application/json'},
+              :method => :post,
+              :data => '{"hello":"this is json"}'
+            })
+          ).
+            and_return(
+              :body => "",
+              :status => 200,
+              :headers => {"Content-Type"=>"text/xml"}
+            )
+        expect(client.builder).to receive(:add).
+          with({:id => 1}, {:commitWith=>10}).
+            and_return('{"hello":"this is json"}')
+        client.add({:id=>1}, :add_attributes => {:commitWith=>10})
+      end
+
+      it "should send json to the connection's #post method" do
+        expect(client).to receive(:execute).
+          with(hash_including({
+              :path => 'update',
+              :headers => {'Content-Type'=>'application/json'},
+              :method => :post,
+              :data => '{"optimise" : {}}'
+            })
+          ).
+            and_return(
+              :body => "",
+              :status => 200,
+              :headers => {"Content-Type"=>"text/xml"}
+          )
+        client.update(:data => '{"optimise" : {}}')
+      end
+    end
   end
 
   context "update" do
-    include ClientHelper
     it "should send data to the connection's #post method" do
-      expect(client.connection).to receive(:execute).
-        with(
-          client, hash_including({
+      expect(client).to receive(:execute).
+        with(hash_including({
             :path => "update",
             :headers => {"Content-Type"=>"text/xml"},
             :method => :post,
@@ -247,12 +260,10 @@ describe "RSolr::Client" do
   end
 
   context "post based helper methods:" do
-    include ClientHelper
     [:commit, :optimize, :rollback].each do |meth|
       it "should send a #{meth} message to the connection's #post method" do
-        expect(client.connection).to receive(:execute).
-          with(
-            client, hash_including({
+        expect(client).to receive(:execute).
+          with(hash_including({
               :path => "update",
               :headers => {"Content-Type"=>"text/xml"},
               :method => :post,
@@ -270,11 +281,10 @@ describe "RSolr::Client" do
   end
 
   context "delete_by_id" do
-    include ClientHelper
     it "should send data to the connection's #post method" do
-      expect(client.connection).to receive(:execute).
+      expect(client).to receive(:execute).
         with(
-          client, hash_including({
+          hash_including({
             :path => "update",
             :headers => {"Content-Type"=>"text/xml"},
             :method => :post,
@@ -291,11 +301,10 @@ describe "RSolr::Client" do
   end
 
   context "delete_by_query" do
-    include ClientHelper
     it "should send data to the connection's #post method" do
-      expect(client.connection).to receive(:execute).
+      expect(client).to receive(:execute).
         with(
-          client, hash_including({
+          hash_including({
             :path => "update",
             :headers => {"Content-Type"=>"text/xml"},
             :method => :post,
@@ -312,7 +321,6 @@ describe "RSolr::Client" do
   end
 
   context "adapt_response" do
-    include ClientHelper
     it 'should not try to evaluate ruby when the :qt is not :ruby' do
       body = '{"time"=>"NOW"}'
       result = client.adapt_response({:params=>{}}, {:status => 200, :body => body, :headers => {}})
@@ -350,9 +358,9 @@ describe "RSolr::Client" do
   end
 
   context "indifferent access" do
-    include ClientHelper
     it "should raise a RuntimeError if the #with_indifferent_access extension isn't loaded" do
-      hide_const("HashWithIndifferentAccess")
+      hide_const("::RSolr::HashWithIndifferentAccessWithResponse")
+      hide_const("ActiveSupport::HashWithIndifferentAccess")
       body = "{'foo'=>'bar'}"
       result = client.adapt_response({:params=>{:wt=>:ruby}}, {:status => 200, :body => body, :headers => {}})
       expect { result.with_indifferent_access }.to raise_error RuntimeError
@@ -375,7 +383,6 @@ describe "RSolr::Client" do
   end
 
   context "build_request" do
-    include ClientHelper
     let(:data) { 'data' }
     let(:params) { { q: 'test', fq: [0,1] } }
     let(:options) { { method: :post, params: params, data: data, headers: {} } }
@@ -383,7 +390,7 @@ describe "RSolr::Client" do
 
     context "when params are symbols" do
       it 'should return a request context array' do
-        [/fq=0/, /fq=1/, /q=test/, /wt=ruby/].each do |pattern|
+        [/fq=0/, /fq=1/, /q=test/, /wt=json/].each do |pattern|
           expect(subject[:query]).to match pattern
         end
         expect(subject[:data]).to eq("data")
@@ -405,11 +412,11 @@ describe "RSolr::Client" do
       let(:options) { { method: :post, data: data, headers: {} } }
 
       it "sets the Content-Type header to application/x-www-form-urlencoded; charset=UTF-8" do
-        expect(subject[:query]).to eq("wt=ruby")
+        expect(subject[:query]).to eq("wt=json")
         [/fq=0/, /fq=1/, /q=test/].each do |pattern|
           expect(subject[:data]).to match pattern
         end
-        expect(subject[:data]).not_to match /wt=ruby/
+        expect(subject[:data]).not_to match(/wt=json/)
         expect(subject[:headers]).to eq({"Content-Type" => "application/x-www-form-urlencoded; charset=UTF-8"})
       end
     end
@@ -420,7 +427,7 @@ describe "RSolr::Client" do
         :data => {:q=>'test', :fq=>[0,1]},
         :headers => {}
       )
-      expect(result[:uri].to_s).to match /^http:\/\/localhost:9999\/solr\//
+      expect(result[:uri].to_s).to match %r{^http://localhost:9999/solr/}
     end
   end
 end

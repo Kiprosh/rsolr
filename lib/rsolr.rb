@@ -1,16 +1,27 @@
 module RSolr
-  
-  Dir.glob(File.expand_path("../rsolr/*.rb", __FILE__)).each{|rb_file| require(rb_file)}
-  
+  require 'rsolr/version'
+
+  autoload :Char, 'rsolr/char'
+  autoload :Client, 'rsolr/client'
+  autoload :Document, 'rsolr/document'
+  autoload :Error, 'rsolr/error'
+  autoload :Field, 'rsolr/field'
+  autoload :Generator, 'rsolr/generator'
+  autoload :HashWithResponse, 'rsolr/response'
+  autoload :JSON, 'rsolr/json'
+  autoload :Response, 'rsolr/response'
+  autoload :Uri, 'rsolr/uri'
+  autoload :Xml, 'rsolr/xml'
+
   def self.connect *args
-    driver = Class === args[0] ? args[0] : RSolr::Connection
-    opts = Hash === args[-1] ? args[-1] : {}
-    Client.new driver.new, opts
+    opts = args.pop if args.last.is_a?(::Hash)
+    opts ||= {}
+
+    connection = args.first
+
+    Client.new connection, opts
   end
-  
-  # RSolr.escape, which is deprecated as of 2015-02
-  extend Char
-  
+
   # backslash escape characters that have special meaning to Solr query parser
   # per http://lucene.apache.org/core/4_0_0/queryparser/org/apache/lucene/queryparser/classic/package-summary.html#Escaping_Special_Characters
   #  + - & | ! ( ) { } [ ] ^ " ~ * ? : \ /
@@ -22,5 +33,20 @@ module RSolr
     # so the result sent to Solr is ultimately a single backslash in front of the particular character 
     str.gsub(/([+\-&|!\(\)\{\}\[\]\^"~\*\?:\\\/])/, '\\\\\1')
   end
-  
+
+  module Array
+    def self.wrap(object)
+      if object.nil?
+        [nil]
+      elsif object.respond_to?(:to_ary)
+        object.to_ary || [object]
+      elsif object.is_a? Hash
+        [object]
+      elsif object.is_a? Enumerable
+        object
+      else
+        [object]
+      end
+    end
+  end
 end

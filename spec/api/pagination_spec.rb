@@ -1,5 +1,6 @@
 require 'spec_helper'
-describe "RSolr::Pagination" do
+
+RSpec.describe RSolr::Client do
   context "build_paginated_request" do
     it "should create the proper solr params and query string" do
       c = RSolr::Client.new(nil, {})#.extend(RSolr::Pagination::Client)
@@ -11,13 +12,6 @@ describe "RSolr::Pagination" do
       expect(r[:uri].query).to match(/rows=25/)
       expect(r[:uri].query).to match(/start=50/)
     end
-
-    it 'passes through client options' do
-      c = RSolr::Client.new(nil, open_timeout: 5, read_timeout: 7)
-      r = c.build_paginated_request 3, 25, "select", {:params => {:q => "test"}}
-      expect(r[:open_timeout]).to eq(5)
-      expect(r[:read_timeout]).to eq(7)
-    end
   end
   context "paginate" do
     it "should build a paginated request context and call execute" do
@@ -28,7 +22,7 @@ describe "RSolr::Pagination" do
         :params => {
           "rows" => 10,
           "start" => 0,
-          :wt => :ruby
+          :wt => :json
         }
       }))
       c.paginate 1, 10, "select"

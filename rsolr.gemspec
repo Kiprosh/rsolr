@@ -30,12 +30,17 @@ Gem::Specification.new do |s|
   s.require_paths = ["lib"]
   
   s.required_ruby_version      = '>= 1.9.3'
+  
+  s.requirements << 'Apache Solr'
 
   s.add_dependency 'builder', '>= 2.1.2'
+  s.add_dependency 'faraday', '>= 0.9.0'
+
   s.add_development_dependency 'activesupport'
   s.add_development_dependency 'nokogiri', '>= 1.4.0'
-  s.add_development_dependency 'rake', '~> 10.0'
-  s.add_development_dependency 'rdoc', '~> 4.0'
+  s.add_development_dependency 'rake', '>= 10.0'
+  s.add_development_dependency 'rdoc', '>= 4.0'
   s.add_development_dependency 'rspec', '~> 3.0'
+  s.add_development_dependency 'simplecov'
   s.add_development_dependency 'solr_wrapper'
 end

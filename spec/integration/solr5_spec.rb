@@ -1,7 +1,7 @@
 require 'spec_helper'
 require 'solr_wrapper'
 
-describe "Solr basic_configs" do
+RSpec.describe "Solr basic_configs" do
   SolrWrapper.default_instance_options = { :version => '5.5.2', :port => "9999" }
   SOLR_INSTANCE =  SolrWrapper.default_instance({})
   before(:all) { SOLR_INSTANCE.start }
@@ -22,6 +22,14 @@ describe "Solr basic_configs" do
       it "should not have a body" do
         expect(subject.head('admin/ping')).to be_kind_of RSolr::HashWithResponse
       end
+    end
+  end
+
+  context "error handling" do
+    subject { RSolr.connect url: "http://localhost:65432/solr/basic_configs/"}
+
+    it "wraps connection errors" do
+      expect { subject.head('admin/ping') }.to raise_error RSolr::Error::ConnectionRefused
     end
   end
 end

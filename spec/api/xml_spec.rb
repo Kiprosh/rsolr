@@ -1,8 +1,8 @@
 require 'spec_helper'
 require 'builder'
 require 'nokogiri'
-describe "RSolr::Xml" do
-  
+
+RSpec.describe RSolr::Xml do
   let(:generator){ RSolr::Xml::Generator.new }
 
   builder_engines = { 
@@ -52,14 +52,20 @@ describe "RSolr::Xml" do
           add_attrs = {:boost=>200.00}
           result = generator.add(documents, add_attrs) do |doc|
             doc.field_by_name(:name).attrs[:boost] = 10
-            expect(doc.fields.size).to eq(4)
-            expect(doc.fields_by_name(:cat).size).to eq(2)
           end
           expect(result).to match(%r(name="cat">cat 1</field>))
           expect(result).to match(%r(name="cat">cat 2</field>))
           expect(result).to match(%r(<add boost="200.0">))
           expect(result).to match(%r(boost="10"))
           expect(result).to match(%r(<field name="id">1</field>))
+        end
+
+        it 'should work for values that yield enumerators' do
+          documents = [{id: 1, cat: ['cat 1', 'cat 2'].to_enum}]
+          result = generator.add(documents)
+
+          expect(result).to match(%r(name="cat">cat 1</field>))
+          expect(result).to match(%r(name="cat">cat 2</field>))
         end
     
         # add a single hash ("doc")
@@ -70,6 +76,26 @@ describe "RSolr::Xml" do
           }
           result = generator.add(data)
           expect(result).to match(/<field name="name">matt<\/field>/)
+          expect(result).to match(/<field name="id">1<\/field>/)
+        end
+
+        # add a single hash ("doc")
+        it 'should create an add from a hash formatted for atomic updates' do
+          data = {
+            :id=>1,
+            :name=> { set: 'matt' }
+          }
+          result = generator.add(data)
+          expect(result).to match(/<field name="name" update="set">matt<\/field>/)
+          expect(result).to match(/<field name="id">1<\/field>/)
+        end
+        it 'should remove a field from a hash formatted for atomic updates' do
+          data = {
+            :id => 1,
+            :name => nil
+          }
+          result = generator.add(data)
+          expect(result).to match(%r{<field name="name" null="true"})
           expect(result).to match(/<field name="id">1<\/field>/)
         end
 
@@ -86,9 +112,8 @@ describe "RSolr::Xml" do
             }
           ]
           message = generator.add(data)
-          expected = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><add><doc><field name=\"id\">1</field><field name=\"name\">matt</field></doc><doc><field name=\"id\">2</field><field name=\"name\">sam</field></doc></add>"
-          expect(message).to match(/<field name="name">matt<\/field>/)
-          expect(message).to match(/<field name="name">sam<\/field>/)
+          expect(message).to match %r{<field name="name">matt</field>}
+          expect(message).to match %r{<field name="name">sam</field>}
         end
 
         # multiValue field support test, thanks to Fouad Mardini!
@@ -114,7 +139,7 @@ describe "RSolr::Xml" do
         end
 
         it 'should create an add from a single Message::Document' do
-          document = RSolr::Xml::Document.new
+          document = RSolr::Document.new
           document.add_field('id', 1)
           document.add_field('name', 'matt', :boost => 2.0)
           result = generator.add(document)
@@ -127,7 +152,7 @@ describe "RSolr::Xml" do
     
         it 'should create adds from multiple Message::Documents' do
           documents = (1..2).map do |i|
-            doc = RSolr::Xml::Document.new
+            doc = RSolr::Document.new
             doc.add_field('id', i)
             doc.add_field('name', "matt#{i}")
             doc
@@ -136,7 +161,24 @@ describe "RSolr::Xml" do
           expect(result).to match(/<field name="name">matt1<\/field>/)
           expect(result).to match(/<field name="name">matt2<\/field>/)
         end
-    
+
+        it 'supports nested child documents' do
+          data = {
+            :_childDocuments_ => [
+              {
+                :id => 1
+              },
+              {
+                :id => 2
+              }
+            ]
+          }
+
+          result = generator.add(data)
+          expect(result).to match(%r{<add><doc><doc>})
+          expect(result).to match(%r{<doc><field name="id">1</field></doc>})
+          expect(result).to match(%r{<doc><field name="id">2</field></doc>})
+        end
       end
   
       context :delete_by_id do
@@ -209,5 +251,5 @@ describe "RSolr::Xml" do
         expect(result).to match(/<field name="whatever">some string<\/field>/)
       end
     end
-  end
+  end  
 end

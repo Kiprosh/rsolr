@@ -1,100 +1,8 @@
-begin; require 'nokogiri'; rescue LoadError; end
-require 'time'
-
 module RSolr::Xml
-  
-  class Document
-    
-    # "attrs" is a hash for setting the "doc" xml attributes
-    # "fields" is an array of Field objects
-    attr_accessor :attrs, :fields
+  Document = RSolr::Document
+  Field = RSolr::Field
 
-    # "doc_hash" must be a Hash/Mash object
-    # If a value in the "doc_hash" is an array,
-    # a field object is created for each value...
-    def initialize(doc_hash = {})
-      @fields = []
-      doc_hash.each_pair do |field,values|
-        # create a new field for each value (multi-valued)
-        wrap(values).each do |v|
-          v = format_value(v)
-          next if v.empty?
-          @fields << RSolr::Xml::Field.new({:name=>field}, v)
-        end
-      end
-      @attrs={}
-    end
-
-    # returns an array of fields that match the "name" arg
-    def fields_by_name(name)
-      @fields.select{|f|f.name==name}
-    end
-
-    # returns the *first* field that matches the "name" arg
-    def field_by_name(name)
-      @fields.detect{|f|f.name==name}
-    end
-
-    #
-    # Add a field value to the document. Options map directly to
-    # XML attributes in the Solr <field> node.
-    # See http://wiki.apache.org/solr/UpdateXmlMessages#head-8315b8028923d028950ff750a57ee22cbf7977c6
-    #
-    # === Example:
-    #
-    #   document.add_field('title', 'A Title', :boost => 2.0)
-    #
-    def add_field(name, value, options = {})
-      @fields << RSolr::Xml::Field.new(options.merge({:name=>name}), value)
-    end
-
-    private
-
-    def format_value(v)
-      case v
-      when Time
-        v.getutc.iso8601
-      when DateTime
-        v.to_time.getutc.iso8601
-      when Date
-        Time.utc(v.year, v.mon, v.mday).iso8601
-      else
-        v.to_s
-      end
-    end
-
-    def wrap(object)
-      if object.nil?
-        []
-      elsif object.respond_to?(:to_ary)
-        object.to_ary || [object]
-      else
-        [object]
-      end
-    end
-  end
-
-  class Field
-    
-    # "attrs" is a hash for setting the "doc" xml attributes
-    # "value" is the text value for the node
-    attr_accessor :attrs, :value
-
-    # "attrs" must be a hash
-    # "value" should be something that responds to #_to_s
-    def initialize(attrs, value)
-      @attrs = attrs
-      @value = value
-    end
-
-    # the value of the "name" attribute
-    def name
-      @attrs[:name]
-    end
-    
-  end
-  
-  class Generator
+  class Generator < RSolr::Generator
     class << self
       attr_accessor :use_nokogiri
 
@@ -108,7 +16,14 @@ module RSolr::Xml
         end
       end
     end
-    self.use_nokogiri = (defined?(::Nokogiri::XML::Builder) and not defined?(JRuby)) ? true : false
+    self.use_nokogiri = defined?(::Nokogiri::XML::Builder) ? true : false
+
+    CONTENT_TYPE = 'text/xml'.freeze
+
+    def content_type
+      CONTENT_TYPE
+    end
+
 
     def nokogiri_build &block
       b = ::Nokogiri::XML::Builder.new do |xml|
@@ -156,17 +71,13 @@ module RSolr::Xml
     #
     def add data, add_attrs = nil, &block
       add_attrs ||= {}
-      data = [data] unless data.is_a?(Array)
+      data = RSolr::Array.wrap(data)
       build do |xml|
         xml.add(add_attrs) do |add_node|
           data.each do |doc|
-            doc = RSolr::Xml::Document.new(doc) if doc.respond_to?(:each_pair)
+            doc = RSolr::Document.new(doc) if doc.respond_to?(:each_pair)
             yield doc if block_given?
-            doc_node_builder = lambda do |doc_node|
-              doc.fields.each do |field_obj|
-                doc_node.field field_obj.value, field_obj.attrs
-              end
-            end
+            doc_node_builder = to_xml(doc)
             self.class.use_nokogiri ? add_node.doc_(doc.attrs,&doc_node_builder) : add_node.doc(doc.attrs,&doc_node_builder)
           end
         end
@@ -193,7 +104,7 @@ module RSolr::Xml
     # generates a <delete><id>ID</id></delete> message
     # "ids" can be a single value or array of values
     def delete_by_id ids
-      ids = [ids] unless ids.is_a?(Array)
+      ids = RSolr::Array.wrap(ids)
       build do |xml|
         xml.delete do |delete_node|
           ids.each do |id| 
@@ -206,10 +117,32 @@ module RSolr::Xml
     # generates a <delete><query>ID</query></delete> message
     # "queries" can be a single value or an array of values
     def delete_by_query(queries)
-      queries = [queries] unless queries.is_a?(Array)
+      queries = RSolr::Array.wrap(queries)
       build do |xml|
         xml.delete do |delete_node|
           queries.each { |query| delete_node.query(query) }
+        end
+      end
+    end
+
+    private
+
+    def to_xml(doc)
+      lambda do |doc_node|
+        doc.fields.each do |field_obj|
+          value = field_obj.value
+
+          if field_obj.name.to_s == RSolr::Document::CHILD_DOCUMENT_KEY
+            child_node_builder = to_xml(field_obj.value)
+            self.class.use_nokogiri ? doc_node.doc_(&child_node_builder) : doc_node.doc(&child_node_builder)
+          elsif value.is_a?(Hash) && value.length == 1 && field_obj.attrs[:update].nil?
+            update_attr, real_value = value.first
+            doc_node.field real_value, field_obj.attrs.merge(update: update_attr)
+          elsif value.nil?
+            doc_node.field field_obj.value, field_obj.attrs.merge(null: true)
+          else
+            doc_node.field field_obj.value, field_obj.attrs
+          end
         end
       end
     end
